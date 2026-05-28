@@ -90,6 +90,16 @@ async function refreshWidget(id, force) {
     const target = document.querySelector(`.widget[data-widget-id="${CSS.escape(id)}"]`);
     if (target === null) return;
 
+    // Snapshot transient client-side UI state that lives only in the DOM. The
+    // server re-renders the widget in its default (collapsed, unscrolled) state,
+    // so without this a refresh would silently reset anything the user touched.
+    // Selectors return document order, which is stable across renders of the
+    // same template, so index alignment between old and new is reliable.
+    const expandedFlags = Array.from(target.querySelectorAll(".collapsible-container"))
+        .map((el) => el.classList.contains("container-expanded"));
+    const carouselScrolls = Array.from(target.querySelectorAll(".carousel-items-container"))
+        .map((el) => el.scrollLeft);
+
     runWidgetCleanup(target);
 
     const placeholder = document.createElement("div");
@@ -99,6 +109,24 @@ async function refreshWidget(id, force) {
         target.removeAttribute("aria-busy");
         return;
     }
+
+    // Suppress the lazy-image fade-in on refresh. New <img loading=lazy> nodes
+    // start at opacity:0 and transition over 0.4s; replaying that on every
+    // refresh is the visible "flicker". Marking them settled paints instantly.
+    newWidgetEl.querySelectorAll("img[loading=lazy]").forEach((img) => {
+        img.classList.add("cached", "finished-transition");
+    });
+
+    // Re-apply expanded state before init so attachExpandToggleButton picks it up.
+    newWidgetEl.querySelectorAll(".collapsible-container").forEach((el, i) => {
+        if (expandedFlags[i]) el.classList.add("container-expanded");
+    });
+
     target.replaceWith(newWidgetEl);
     reinitWidget(newWidgetEl);
+
+    // Restore carousel scroll positions (after init so listeners recompute cutoffs).
+    newWidgetEl.querySelectorAll(".carousel-items-container").forEach((el, i) => {
+        if (carouselScrolls[i]) el.scrollLeft = carouselScrolls[i];
+    });
 }

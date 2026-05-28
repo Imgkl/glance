@@ -372,12 +372,16 @@ function attachExpandToggleButton(collapsibleContainer) {
     const showMoreText = "Show more";
     const showLessText = "Show less";
 
-    let expanded = false;
+    // Initialize from the container's class so that a widget refresh, which
+    // re-applies the expanded state before re-init, restores the button into
+    // the correct state instead of always starting collapsed.
+    let expanded = collapsibleContainer.classList.contains("container-expanded");
     const button = document.createElement("button");
     const icon = document.createElement("span");
     icon.classList.add("expand-toggle-button-icon");
-    const textNode = document.createTextNode(showMoreText);
+    const textNode = document.createTextNode(expanded ? showLessText : showMoreText);
     button.classList.add("expand-toggle-button");
+    if (expanded) button.classList.add("container-expanded");
     button.append(textNode, icon);
     button.addEventListener("click", () => {
         expanded = !expanded;
