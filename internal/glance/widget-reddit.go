@@ -2,15 +2,22 @@ package glance
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"html"
 	"html/template"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
+	"golang.org/x/net/http2"
 )
 
 var (
@@ -81,6 +88,10 @@ func (widget *redditWidget) initialize() error {
 			return errors.New("application name, client ID and client secret are required")
 		}
 		a.enabled = true
+	}
+
+	if !a.enabled && widget.Search != "" {
+		return errors.New("due to changes in Reddit's API, the search property works only when app-auth is configured")
 	}
 
 	widget.
@@ -158,21 +169,21 @@ func (widget *redditWidget) parseCustomCommentsURL(subreddit, postId, postPath s
 }
 
 func (widget *redditWidget) fetchSubredditPosts() (forumPostList, error) {
-	var client requestDoer = defaultHTTPClient
-	var baseURL string
+	var client requestDoer = redditHTTPClient
 	var requestURL string
 	var headers http.Header
+
+	baseURL := "https://oauth.reddit.com"
 	query := url.Values{}
 	app := &widget.AppAuth
 
 	if !app.enabled {
-		baseURL = "https://www.reddit.com"
+		// www.reddit.com no longer serves the .json endpoints to signed-out clients, but the guest
+		// token handed out by its challenge flow works on oauth.reddit.com, which returns the same listings
 		headers = http.Header{
 			"User-Agent": []string{getBrowserUserAgentHeader()},
 		}
 	} else {
-		baseURL = "https://oauth.reddit.com"
-
 		if app.accessToken == "" || time.Now().Add(time.Minute).After(app.tokenExpiresAt) {
 			if err := widget.fetchNewAppAccessToken(); err != nil {
 				return nil, fmt.Errorf("fetching new app access token: %v", err)
@@ -190,9 +201,10 @@ func (widget *redditWidget) fetchSubredditPosts() (forumPostList, error) {
 	}
 
 	if widget.Search != "" {
-		query.Set("q", widget.Search+" subreddit:"+widget.Subreddit)
+		query.Set("q", widget.Search)
 		query.Set("sort", widget.SortBy)
-		requestURL = fmt.Sprintf("%s/search.json?%s", baseURL, query.Encode())
+		query.Set("restrict_sr", "true")
+		requestURL = fmt.Sprintf("%s/r/%s/search?%s", baseURL, widget.Subreddit, query.Encode())
 	} else {
 		if widget.SortBy == "top" {
 			query.Set("t", widget.TopPeriod)
@@ -211,6 +223,15 @@ func (widget *redditWidget) fetchSubredditPosts() (forumPostList, error) {
 		return nil, err
 	}
 	request.Header = headers
+
+	if !app.enabled {
+		token, err := getRedditGuestToken()
+		if err != nil {
+			fmt.Printf("Error fetching reddit guest token: %v\n", err)
+			return nil, errors.New("could not solve reddit challenge")
+		}
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	responseJson, err := decodeJsonFromRequest[subredditResponseJson](client, request)
 	if err != nil {
@@ -307,4 +328,136 @@ func (widget *redditWidget) fetchNewAppAccessToken() error {
 	app.tokenExpiresAt = time.Now().Add(time.Duration(response.ExpiresIn) * time.Second)
 
 	return nil
+}
+
+// On Windows the default HTTP client works fine, but on Linux it seems to
+// get detected and blocked by reddit (or cloudflare) presumably because of TLS fingerprinting,
+// so we use uTLS to mimic a real browser's TLS fingerprint, which seems to work around the issue
+var redditHTTPClient = &http.Client{Transport: &http2.Transport{
+	DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+
+		tcpConn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+
+		uconn := utls.UClient(tcpConn, &utls.Config{
+			ServerName: host,
+		}, utls.HelloFirefox_Auto)
+
+		if err := uconn.HandshakeContext(ctx); err != nil {
+			tcpConn.Close()
+			return nil, err
+		}
+
+		return uconn, nil
+	},
+}}
+
+var (
+	redditChallengePattern = regexp.MustCompile(`await\(async \w+\s*=>\s*\w+\s*\+\s*\w+\)\("([^"]+)"\)`)
+	redditTokenPattern     = regexp.MustCompile(`name="jsc_token"\s+value="([^"]+)"`)
+)
+
+// Allows all widget instances to share a single guest token, since we don't want to draw
+// too much attention by making a lot of requests to the flow that allows us to obtain
+// the token required to access the API endpoints
+var getRedditGuestToken = func() func() (string, error) {
+	var lastUpdate time.Time
+	var cachedToken string
+
+	return NewSingleflight(func() (string, error) {
+		// Caching for 6 hours is a bit arbitrary, the token is valid for 24 hours,
+		// but we want to keep the cache time short in the event that a token becomes invalid
+		// for whatever reason, since we don't have a way to force refresh it
+		if time.Since(lastUpdate) < 6*time.Hour && cachedToken != "" {
+			return cachedToken, nil
+		}
+
+		token, err := fetchRedditGuestToken()
+		if err != nil {
+			if cachedToken != "" {
+				fmt.Printf("Error fetching new reddit guest token, using cached value: %v\n", err)
+				return cachedToken, nil
+			}
+			return "", err
+		}
+
+		lastUpdate = time.Now()
+		cachedToken = token
+		return token, nil
+	})
+}()
+
+func fetchRedditGuestToken() (string, error) {
+	request, err := http.NewRequest("GET", "https://www.reddit.com/", nil)
+	if err != nil {
+		return "", err
+	}
+
+	setBrowserUserAgentHeader(request)
+
+	response, err := redditHTTPClient.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status code %d when requesting challenge page", response.StatusCode)
+	}
+
+	challengeBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		return "", err
+	}
+
+	challengeMatches := redditChallengePattern.FindSubmatch(challengeBody)
+	tokenMatches := redditTokenPattern.FindSubmatch(challengeBody)
+
+	if challengeMatches == nil {
+		return "", fmt.Errorf("no JS challenge found")
+	}
+
+	if tokenMatches == nil {
+		return "", fmt.Errorf("no token found in challenge page")
+	}
+
+	challengeStr := string(challengeMatches[1])
+	token := string(tokenMatches[1])
+	solution := challengeStr + challengeStr // the JS does: e + e
+
+	params := url.Values{
+		"solution":     {solution},
+		"js_challenge": {"1"},
+		"jsc_token":    {token},
+	}
+	request, err = http.NewRequest("GET", "https://www.reddit.com/?"+params.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+
+	setBrowserUserAgentHeader(request)
+
+	response, err = redditHTTPClient.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status code %d when submitting challenge solution", response.StatusCode)
+	}
+
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "token_v2" {
+			return cookie.Value, nil
+		}
+	}
+
+	return "", fmt.Errorf("no token_v2 cookie found")
 }
