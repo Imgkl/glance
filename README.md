@@ -1,130 +1,44 @@
-<p align="center"><img src="docs/logo.png"></p>
-<h1 align="center">Glance</h1>
+# Glance
 
-<p align="center">A fork of <a href="https://github.com/glanceapp/glance">glanceapp/glance</a> where widgets refresh live, in place, without reloading the page.</p>
+A self-hosted dashboard where every widget refreshes live, in place, without reloading the page. Forked from [glanceapp/glance](https://github.com/glanceapp/glance).
 
-<p align="center">
-  <a href="#whats-different">What's different</a> •
-  <a href="#running-it">Running it</a> •
-  <a href="docs/configuration.md#configuring-glance">Configuration</a> •
-  <a href="CHANGELOG.md">Changelog</a>
-</p>
+Stock Glance shows what it fetched when the page loaded; to see new data you reload. Here each widget refreshes on its own schedule, and only what changed is touched. Images don't reload, nothing flickers, and anything you opened (a "Show more" list, a dropdown, a popover) stays open.
 
-![](docs/images/readme-main-image.png)
+## What it does
 
-Everything upstream Glance does works the same here; its
-[configuration docs](docs/configuration.md), [themes](docs/themes.md) and
-[preconfigured pages](docs/preconfigured-pages.md) still apply. This fork adds
-live refresh on top and tracks upstream releases.
+- **`refresh-interval` on any widget.** For example, `refresh-interval: 30s`, with a 5 second minimum. New data is still fetched only when the widget's `cache` expires, so short intervals are cheap. Static and interactive widgets (`clock`, `calendar`, `to-do`, `search`, `bookmarks`, `iframe`, `html`, `group`, `split-column`) reject it.
+- **Skips unchanged widgets.** The refresh endpoint answers `304 Not Modified` when the render is the same.
+- **Patches changed ones.** Only the server's changes are applied to the live page. Rows are matched by what they link to or show, so added, removed or reordered items keep their elements.
+- **Pauses in background tabs.**
+- **Works for widgets nested** in `group` and `split-column`, and each widget refreshes under its own lock.
 
-## What's different
+Everything else is upstream Glance: see the [configuration docs](docs/configuration.md#refresh-interval).
 
-### Live per-widget refresh
+## Run
 
-Any widget can refresh itself in the browser on its own schedule:
-
-```yaml
-- type: docker-containers
-  refresh-interval: 30s
-```
-
-- The minimum is `5s`. Widgets with no data to refresh or with their own
-  client-side state (`calendar`, `to-do`, `clock`, `iframe`, `html`, `search`,
-  `bookmarks`, `group`, `split-column`) reject it at config load.
-- A refresh re-renders the widget, but fetches new data only once its `cache`
-  has expired, so a short interval doesn't hammer the services behind it.
-- Timers pause while the tab is hidden.
-
-See [`refresh-interval`](docs/configuration.md#refresh-interval) for details.
-
-### No flicker, no lost state
-
-Refreshing doesn't swap the widget out:
-
-- **Unchanged widgets aren't touched.** The refresh endpoint answers `304 Not
-  Modified` (via ETag) when the render hasn't changed.
-- **Changed widgets are patched in place.** Only what the server changed is
-  applied to the page. Rows are matched by what they link to or show, so items
-  that are added, removed or reordered keep their elements and images don't
-  reload.
-- **What you opened stays open.** Expanded "Show more" lists, dropdowns,
-  hover popovers and carousel scroll positions survive refreshes.
-
-### Under the hood
-
-| File | Role |
-| --- | --- |
-| `internal/glance/widget-refresh.go` | `GET /api/widgets/{id}/refresh`: renders one widget, with ETag revalidation |
-| `internal/glance/static/js/widget-refresh.js` | Per-widget timers, visibility pausing, fetching |
-| `internal/glance/static/js/morph.js` | Patches the live widget toward the new render (three-way merge against the previous one) |
-| `internal/glance/static/js/lifecycle.js` | Remembers each server render; cleans up after removed elements |
-
-Widgets are refreshable by ID even when nested in `group` and `split-column`,
-and each widget has its own lock, so one slow widget doesn't hold up the page.
-
-## Running it
-
-Multi-arch images (amd64, arm64, armv7) are published to GitHub Container
-Registry for every release:
+Images for amd64, arm64 and armv7 are on GitHub Container Registry:
 
 ```yaml
 services:
   glance:
-    container_name: glance
     image: ghcr.io/imgkl/glance:v2026.11.0
-    restart: unless-stopped
     volumes:
       - ./config:/app/config
-      - /var/run/docker.sock:/var/run/docker.sock:ro # only for docker-containers
     ports:
       - 8080:8080
 ```
 
-`latest` follows the newest release, but pinning a version from the
-[changelog](CHANGELOG.md) keeps upgrades deliberate. For config files and everything else about setting Glance up, see upstream's
-[installation guide](https://github.com/glanceapp/glance#installation) and the
-[configuration docs](docs/configuration.md).
+## Develop
+
+```bash
+go run .
+go test ./...
+```
+
+`dev/refresh-check.cjs` opens a real browser against a running instance and checks that refreshes keep opened state and rebuild nothing. It expects the widgets it names (AdGuard, Tailscale, Server Stats, Prowlarr).
 
 ## Versions
 
-Releases use calendar versions, `vYYYY.MM.N`, so they never collide with
-upstream's tags. Each entry in the [changelog](CHANGELOG.md) lists what was
-merged from upstream separately from the fork's own changes.
+Calendar versions (`vYYYY.MM.N`), so they never clash with upstream's tags. Pushing a `v*` tag publishes the images. The [changelog](CHANGELOG.md) lists upstream merges separately from changes made here.
 
-Pushing a `v*` tag builds and publishes the images (`.github/workflows/release.yaml`).
-
-## Development
-
-Requires Go 1.27+.
-
-```bash
-go run .                # run locally
-go test ./...           # unit tests
-```
-
-`dev/refresh-check.cjs` drives a real browser against a running instance and
-checks that refreshes keep opened state and don't rebuild widgets or images.
-It expects pages with the widgets it names (AdGuard, Tailscale, Server Stats,
-Prowlarr), so adjust it to your own config:
-
-```bash
-PLAYWRIGHT=/path/to/node_modules/playwright node dev/refresh-check.cjs http://localhost:8080
-```
-
-### Merging upstream
-
-```bash
-git fetch upstream --tags
-git merge v0.8.8        # upstream's release tag; merge, don't rebase
-```
-
-Upstream's README changes always conflict with this one; keep this one. Then
-run the tests and the browser check, and add an "Upstream" section to the next
-changelog entry.
-
-## Credits
-
-Glance is built by [svilenmarkov](https://github.com/svilenmarkov) and
-[contributors](https://github.com/glanceapp/glance/graphs/contributors). Issues
-and feature requests for Glance itself belong
-[upstream](https://github.com/glanceapp/glance/issues).
+To take an upstream release, merge its tag (`git fetch upstream --tags && git merge v0.8.8`) rather than rebasing. If upstream's README conflicts, keep this one.
