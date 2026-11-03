@@ -753,7 +753,9 @@ cache: 1d  # 1 day
 > Not all widgets can have their cache duration modified. The calendar and weather widgets update on the hour and this cannot be changed.
 
 #### `refresh-interval`
-How often the widget should automatically refresh in the browser without a full page reload. Same syntax as `cache` (a number followed by `s`, `m`, `h`, or `d`). Each tick re-renders the widget; if the widget's cache hasn't expired, the existing data is reused, so a tight refresh interval is safe and won't hammer upstream APIs. Use the manual refresh button to force a fresh fetch. The minimum allowed interval is 5 seconds.
+How often the widget should automatically refresh in the browser without a full page reload. Same syntax as `cache` (a number followed by `s`, `m`, `h`, or `d`). Each tick re-renders the widget; if the widget's cache hasn't expired, the existing data is reused, so a tight refresh interval is safe and won't hammer upstream APIs. The minimum allowed interval is 5 seconds.
+
+If the rendered widget is unchanged, nothing on the page is touched. Otherwise only what changed is patched in place, so images don't reload and anything you opened (expanded lists, dropdowns, popovers, scroll positions) stays as it was.
 
 ```yaml
 refresh-interval: 1m

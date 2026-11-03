@@ -1,11 +1,17 @@
 
 import { clamp } from "./utils.js";
+import { onElementRemoved } from "./lifecycle.js";
+
+const setUpMasonries = new WeakSet();
 
 export function setupMasonries(root = document) {
     const masonryContainers = root.getElementsByClassName("masonry");
 
     for (let i = 0; i < masonryContainers.length; i++) {
         const container = masonryContainers[i];
+
+        if (setUpMasonries.has(container)) continue;
+        setUpMasonries.add(container);
 
         const options = {
             minColumnWidth: container.dataset.minColumnWidth || 330,
@@ -47,10 +53,6 @@ export function setupMasonries(root = document) {
         const observer = new ResizeObserver(() => requestAnimationFrame(render));
         observer.observe(container);
 
-        const widgetEl = container.closest(".widget");
-        if (widgetEl !== null) {
-            if (!widgetEl._cleanupCallbacks) widgetEl._cleanupCallbacks = [];
-            widgetEl._cleanupCallbacks.push(() => observer.disconnect());
-        }
+        onElementRemoved(container, () => observer.disconnect());
     }
 }

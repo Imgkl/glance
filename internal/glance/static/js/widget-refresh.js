@@ -1,10 +1,13 @@
-import { reinitWidget, runWidgetCleanup } from './page.js';
+import { enhanceWidget } from './page.js';
+import { morph } from './morph.js';
+import { rememberServerRender, sweepRemovedElements } from './lifecycle.js';
 
-// Per-widget interval handles, keyed by widget id. Outerhtml replacement
-// creates new DOM nodes for the widget, so id is the stable key.
+// Per-widget interval handles, keyed by widget id.
 const intervals = new Map();
 const intervalSeconds = new Map();
 const lastRefreshAt = new Map();
+const etags = new Map();
+const inFlight = new Set();
 
 let baseURL = "";
 let visibilityListenerInstalled = false;
@@ -35,7 +38,7 @@ export function setupWidgetRefresh(_baseURL) {
         const now = Date.now();
         intervalSeconds.forEach((seconds, id) => {
             const last = lastRefreshAt.get(id) || 0;
-            if (now - last >= seconds * 1000) refreshWidget(id, false);
+            if (now - last >= seconds * 1000) refreshWidget(id);
             startInterval(id, seconds);
         });
     });
@@ -44,7 +47,7 @@ export function setupWidgetRefresh(_baseURL) {
 function startInterval(id, seconds) {
     const existing = intervals.get(id);
     if (existing !== undefined) clearInterval(existing);
-    intervals.set(id, setInterval(() => refreshWidget(id, false), seconds * 1000));
+    intervals.set(id, setInterval(() => refreshWidget(id), seconds * 1000));
 }
 
 function stopInterval(id) {
@@ -55,78 +58,77 @@ function stopInterval(id) {
     }
     intervalSeconds.delete(id);
     lastRefreshAt.delete(id);
+    etags.delete(id);
 }
 
-async function refreshWidget(id, force) {
-    const widgetEl = document.querySelector(`.widget[data-widget-id="${CSS.escape(id)}"]`);
-    if (widgetEl === null) {
+function findWidget(id) {
+    return document.querySelector(`.widget[data-widget-id="${CSS.escape(id)}"]`);
+}
+
+async function refreshWidget(id) {
+    if (findWidget(id) === null) {
         stopInterval(id);
         return;
     }
 
-    widgetEl.setAttribute("aria-busy", "true");
+    // A slow upstream can make a request outlast the interval; don't stack them.
+    if (inFlight.has(id)) return;
+    inFlight.add(id);
     lastRefreshAt.set(id, Date.now());
 
-    let html;
     try {
-        const url = `${baseURL}/api/widgets/${encodeURIComponent(id)}/refresh${force ? "?force=1" : ""}`;
-        const res = await fetch(url, { credentials: "same-origin" });
+        const headers = {};
+        if (etags.has(id)) headers["If-None-Match"] = etags.get(id);
+
+        const res = await fetch(`${baseURL}/api/widgets/${encodeURIComponent(id)}/refresh`, {
+            credentials: "same-origin",
+            cache: "no-store",
+            headers,
+        });
+
+        // Same render as last time: nothing to do, and nothing gets repainted.
+        if (res.status === 304) return;
+
         if (!res.ok) {
-            widgetEl.removeAttribute("aria-busy");
             // 404 means the widget id is unknown to the server (e.g., after a
             // config reload that reassigned ids). Don't keep retrying — a full
             // page reload will repopulate intervals with fresh ids.
             if (res.status === 404) stopInterval(id);
             return;
         }
-        html = await res.text();
+
+        const html = await res.text();
+        const target = findWidget(id);
+        if (target === null) return;
+
+        applyRender(target, html);
+
+        const etag = res.headers.get("ETag");
+        if (etag !== null) etags.set(id, etag);
     } catch (e) {
         console.error("widget refresh failed", id, e);
-        widgetEl.removeAttribute("aria-busy");
-        return;
+    } finally {
+        inFlight.delete(id);
+    }
+}
+
+function applyRender(widgetEl, html) {
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    const next = template.content.firstElementChild;
+    if (next === null) return;
+
+    // Masonry moves the server's children into client-made columns, so the
+    // live DOM no longer mirrors the server's structure and can't be patched.
+    if (widgetEl.querySelector(".masonry") !== null) {
+        const replacement = document.importNode(next, true);
+        rememberServerRender(replacement);
+        widgetEl.replaceWith(replacement);
+        widgetEl = replacement;
+    } else {
+        morph(widgetEl, next);
     }
 
-    // Re-find in case something else swapped during the await.
-    const target = document.querySelector(`.widget[data-widget-id="${CSS.escape(id)}"]`);
-    if (target === null) return;
-
-    // Snapshot transient client-side UI state that lives only in the DOM. The
-    // server re-renders the widget in its default (collapsed, unscrolled) state,
-    // so without this a refresh would silently reset anything the user touched.
-    // Selectors return document order, which is stable across renders of the
-    // same template, so index alignment between old and new is reliable.
-    const expandedFlags = Array.from(target.querySelectorAll(".collapsible-container"))
-        .map((el) => el.classList.contains("container-expanded"));
-    const carouselScrolls = Array.from(target.querySelectorAll(".carousel-items-container"))
-        .map((el) => el.scrollLeft);
-
-    runWidgetCleanup(target);
-
-    const placeholder = document.createElement("div");
-    placeholder.innerHTML = html;
-    const newWidgetEl = placeholder.firstElementChild;
-    if (newWidgetEl === null) {
-        target.removeAttribute("aria-busy");
-        return;
-    }
-
-    // Suppress the lazy-image fade-in on refresh. New <img loading=lazy> nodes
-    // start at opacity:0 and transition over 0.4s; replaying that on every
-    // refresh is the visible "flicker". Marking them settled paints instantly.
-    newWidgetEl.querySelectorAll("img[loading=lazy]").forEach((img) => {
-        img.classList.add("cached", "finished-transition");
-    });
-
-    // Re-apply expanded state before init so attachExpandToggleButton picks it up.
-    newWidgetEl.querySelectorAll(".collapsible-container").forEach((el, i) => {
-        if (expandedFlags[i]) el.classList.add("container-expanded");
-    });
-
-    target.replaceWith(newWidgetEl);
-    reinitWidget(newWidgetEl);
-
-    // Restore carousel scroll positions (after init so listeners recompute cutoffs).
-    newWidgetEl.querySelectorAll(".carousel-items-container").forEach((el, i) => {
-        if (carouselScrolls[i]) el.scrollLeft = carouselScrolls[i];
-    });
+    sweepRemovedElements();
+    enhanceWidget(widgetEl);
 }

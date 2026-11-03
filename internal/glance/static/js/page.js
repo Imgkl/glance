@@ -3,25 +3,7 @@ import { setupMasonries } from './masonry.js';
 import { throttledDebounce, isElementVisible, openURLInNewTab } from './utils.js';
 import { elem, find, findAll } from './templating.js';
 import { setupWidgetRefresh } from './widget-refresh.js';
-
-// Cleanup callbacks for things that aren't auto-released when a widget's
-// outerHTML is replaced (window/document listeners, ResizeObservers, intervals).
-// Stored on the widget's root element; run from widget-refresh.js before swap.
-function registerWidgetCleanup(target, cb) {
-    const widgetEl = target instanceof Element ? target.closest(".widget") : null;
-    if (widgetEl === null) return;
-    if (!widgetEl._cleanupCallbacks) widgetEl._cleanupCallbacks = [];
-    widgetEl._cleanupCallbacks.push(cb);
-}
-
-export function runWidgetCleanup(widgetEl) {
-    const callbacks = widgetEl._cleanupCallbacks;
-    if (!callbacks) return;
-    widgetEl._cleanupCallbacks = null;
-    for (let i = 0; i < callbacks.length; i++) {
-        try { callbacks[i](); } catch (e) { console.error(e); }
-    }
-}
+import { onElementRemoved, rememberServerRender } from './lifecycle.js';
 
 async function fetchPageContent(pageData) {
     // TODO: handle non 200 status codes/time outs
@@ -32,6 +14,11 @@ async function fetchPageContent(pageData) {
     return content;
 }
 
+// The setup functions that take a root are also re-run on a widget after a
+// refresh patched it, so they must be safe to run on already-set-up elements.
+
+const carouselCutoffUpdaters = new WeakMap();
+
 function setupCarousels(root = document) {
     const carouselElements = root.getElementsByClassName("carousel-container");
 
@@ -41,6 +28,12 @@ function setupCarousels(root = document) {
 
     for (let i = 0; i < carouselElements.length; i++) {
         const carousel = carouselElements[i];
+
+        if (carouselCutoffUpdaters.has(carousel)) {
+            carouselCutoffUpdaters.get(carousel)();
+            continue;
+        }
+
         carousel.classList.add("show-right-cutoff");
         const itemsContainer = carousel.getElementsByClassName("carousel-items-container")[0];
 
@@ -62,7 +55,8 @@ function setupCarousels(root = document) {
 
         itemsContainer.addEventListener("scroll", determineSideCutoffsRateLimited);
         window.addEventListener("resize", determineSideCutoffsRateLimited);
-        registerWidgetCleanup(carousel, () => window.removeEventListener("resize", determineSideCutoffsRateLimited));
+        onElementRemoved(carousel, () => window.removeEventListener("resize", determineSideCutoffsRateLimited));
+        carouselCutoffUpdaters.set(carousel, determineSideCutoffs);
 
         afterContentReady(determineSideCutoffs);
     }
@@ -338,12 +332,16 @@ function setupGroups() {
     }
 }
 
+const trackedLazyImages = new WeakSet();
+
 function setupLazyImages(root = document) {
-    const images = root.querySelectorAll("img[loading=lazy]");
+    const images = Array.from(root.querySelectorAll("img[loading=lazy]")).filter((image) => !trackedLazyImages.has(image));
 
     if (images.length == 0) {
         return;
     }
+
+    images.forEach((image) => trackedLazyImages.add(image));
 
     function imageFinishedTransition(image) {
         image.classList.add("finished-transition");
@@ -373,16 +371,12 @@ function attachExpandToggleButton(collapsibleContainer) {
     const showMoreText = "Show more";
     const showLessText = "Show less";
 
-    // Initialize from the container's class so that a widget refresh, which
-    // re-applies the expanded state before re-init, restores the button into
-    // the correct state instead of always starting collapsed.
-    let expanded = collapsibleContainer.classList.contains("container-expanded");
+    let expanded = false;
     const button = document.createElement("button");
     const icon = document.createElement("span");
     icon.classList.add("expand-toggle-button-icon");
-    const textNode = document.createTextNode(expanded ? showLessText : showMoreText);
+    const textNode = document.createTextNode(showMoreText);
     button.classList.add("expand-toggle-button");
-    if (expanded) button.classList.add("container-expanded");
     button.append(textNode, icon);
     button.addEventListener("click", () => {
         expanded = !expanded;
@@ -412,10 +406,12 @@ function attachExpandToggleButton(collapsibleContainer) {
     });
 
     collapsibleContainer.after(button);
+    onElementRemoved(collapsibleContainer, () => button.remove());
 
     return button;
 };
 
+const listExpandButtons = new WeakMap();
 
 function setupCollapsibleLists(root = document) {
     const collapsibleLists = root.querySelectorAll(".list.collapsible-container");
@@ -437,19 +433,34 @@ function setupCollapsibleLists(root = document) {
             continue;
         }
 
-        if (list.children.length <= collapseAfter) {
-            continue;
+        // Derived from the current children every time, since a refresh may
+        // have grown or shrunk the list since the last run.
+        const collapsible = list.children.length > collapseAfter;
+        const button = listExpandButtons.get(list);
+
+        if (collapsible && button === undefined) {
+            listExpandButtons.set(list, attachExpandToggleButton(list));
+        } else if (!collapsible && button !== undefined) {
+            button.remove();
+            listExpandButtons.delete(list);
+            list.classList.remove("container-expanded");
         }
 
-        attachExpandToggleButton(list);
-
-        for (let c = collapseAfter; c < list.children.length; c++) {
+        for (let c = 0; c < list.children.length; c++) {
             const child = list.children[c];
-            child.classList.add("collapsible-item");
-            child.style.animationDelay = ((c - collapseAfter) * 20).toString() + "ms";
+
+            if (collapsible && c >= collapseAfter) {
+                child.classList.add("collapsible-item");
+                child.style.animationDelay = ((c - collapseAfter) * 20).toString() + "ms";
+            } else {
+                child.classList.remove("collapsible-item");
+                child.style.removeProperty("animation-delay");
+            }
         }
     }
 }
+
+const gridCollapseResolvers = new WeakMap();
 
 function setupCollapsibleGrids(root = document) {
     const collapsibleGridElements = root.querySelectorAll(".cards-grid.collapsible-container");
@@ -460,6 +471,11 @@ function setupCollapsibleGrids(root = document) {
 
     for (let i = 0; i < collapsibleGridElements.length; i++) {
         const gridElement = collapsibleGridElements[i];
+
+        if (gridCollapseResolvers.has(gridElement)) {
+            gridCollapseResolvers.get(gridElement)();
+            continue;
+        }
 
         if (gridElement.dataset.collapseAfterRows === undefined) {
             continue;
@@ -480,6 +496,9 @@ function setupCollapsibleGrids(root = document) {
         let cardsPerRow;
 
         const resolveCollapsibleItems = () => requestAnimationFrame(() => {
+            // Not laid out yet; the resize observer resolves once it is.
+            if (cardsPerRow === undefined) return;
+
             const hideItemsAfterIndex = cardsPerRow * collapseAfterRows;
 
             if (hideItemsAfterIndex >= gridElement.children.length) {
@@ -523,7 +542,8 @@ function setupCollapsibleGrids(root = document) {
         });
 
         afterContentReady(() => observer.observe(gridElement));
-        registerWidgetCleanup(gridElement, () => observer.disconnect());
+        onElementRemoved(gridElement, () => observer.disconnect());
+        gridCollapseResolvers.set(gridElement, resolveCollapsibleItems);
     }
 }
 
@@ -539,8 +559,9 @@ function afterContentReady(callback) {
 }
 
 // Re-runs the subset of setup functions that apply to widget content. Called
-// after a widget's outerHTML is replaced via the refresh endpoint.
-export function reinitWidget(rootEl) {
+// by widget-refresh.js after a refresh patched (or, rarely, replaced) a widget.
+// Popover listeners are module-level functions, so re-adding them is a no-op.
+export function enhanceWidget(rootEl) {
     setupPopovers(rootEl);
     setupCarousels(rootEl);
     setupCollapsibleLists(rootEl);
@@ -706,6 +727,10 @@ async function setupTodos() {
     }
 }
 
+// Titles we derived from text, as opposed to ones the server rendered. These
+// are recomputed on re-runs so they follow text a refresh changed.
+const derivedTitles = new WeakSet();
+
 function setupTruncatedElementTitles(root = document) {
     const elements = root.querySelectorAll(".text-truncate, .single-line-titles .title, .text-truncate-2-lines, .text-truncate-3-lines");
 
@@ -715,8 +740,10 @@ function setupTruncatedElementTitles(root = document) {
 
     for (let i = 0; i < elements.length; i++) {
         const element = elements[i];
-        if (element.getAttribute("title") === null)
+        if (element.getAttribute("title") === null || derivedTitles.has(element)) {
             element.title = element.innerText.trim().replace(/\s+/g, " ");
+            derivedTitles.add(element);
+        }
     }
 }
 
@@ -812,6 +839,9 @@ async function setupPage() {
     const pageContent = await fetchPageContent(pageData);
 
     pageContentElement.innerHTML = pageContent;
+    // Before any setup function touches it, so refreshes can tell the
+    // server's markup apart from what the client adds.
+    rememberServerRender(pageContentElement);
 
     try {
         setupPopovers();

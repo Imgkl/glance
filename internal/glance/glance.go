@@ -443,42 +443,6 @@ func (a *application) handleWidgetRequest(w http.ResponseWriter, r *http.Request
 	widget.handleRequest(w, r)
 }
 
-func (a *application) handleWidgetRefreshRequest(w http.ResponseWriter, r *http.Request) {
-	if a.handleUnauthorizedResponse(w, r, showUnauthorizedJSON) {
-		return
-	}
-
-	widgetID, err := strconv.ParseUint(r.PathValue("widget"), 10, 64)
-	if err != nil {
-		a.handleNotFound(w, r)
-		return
-	}
-
-	widget, exists := a.widgetByID[widgetID]
-	if !exists {
-		a.handleNotFound(w, r)
-		return
-	}
-
-	force := r.URL.Query().Get("force") == "1"
-
-	func() {
-		widget.lock()
-		defer widget.unlock()
-
-		now := time.Now()
-		if force || widget.requiresUpdate(&now) {
-			widget.update(r.Context())
-		}
-	}()
-
-	// Render outside the lock; renderTemplate re-acquires it briefly.
-	// Returning the full widget element (including header) lets the client
-	// replace the widget's outerHTML without needing a separate fragment template.
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(widget.Render()))
-}
-
 func (a *application) StaticAssetPath(asset string) string {
 	return a.Config.Server.BaseURL + "/static/" + staticFSHash + "/" + asset
 }
