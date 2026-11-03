@@ -1,5 +1,8 @@
 <p align="center"><img src="docs/logo.png"></p>
 <h1 align="center">Glance</h1>
+
+> **Personal fork** of [glanceapp/glance](https://github.com/glanceapp/glance) with live per-widget refresh. See [CHANGELOG.md](CHANGELOG.md) for what differs from upstream and what was merged from it.
+
 <p align="center">
   <a href="#installation">Install</a> •
   <a href="docs/configuration.md#configuring-glance">Configuration</a> •
