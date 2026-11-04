@@ -2,17 +2,17 @@
 
 A self-hosted dashboard where every widget refreshes live, in place, without reloading the page. Forked from [glanceapp/glance](https://github.com/glanceapp/glance).
 
-Stock Glance shows what it fetched when the page loaded; to see new data you reload. Here each widget refreshes on its own schedule, and only what changed is touched. Images don't reload, nothing flickers, and anything you opened (a "Show more" list, a dropdown, a popover) stays open.
+Stock Glance shows what it fetched when the page loaded; to see new data you reload. Here each widget refreshes as soon as its cache expires, and only what changed is touched. Images don't reload, nothing flickers, and anything you opened (a "Show more" list, a dropdown, a popover) stays open.
 
 ## What it does
 
-- **`refresh-interval` on any widget.** For example, `refresh-interval: 30s`, with a 5 second minimum. New data is still fetched only when the widget's `cache` expires, so short intervals are cheap. Static and interactive widgets (`clock`, `calendar`, `to-do`, `search`, `bookmarks`, `iframe`, `html`, `group`, `split-column`) reject it.
+- **`cache` is the refresh rate.** `cache: 5s` means the widget is never more than 5 seconds out of date while you're looking at it. There's no separate setting, and the floor is 2 seconds. Hourly widgets (weather) refresh on the hour, and after a failed update the page follows the widget's early retry.
+- **Only while someone is looking.** Nothing is fetched when no dashboard is open, and a background tab stops refreshing until it's visible again.
 - **Skips unchanged widgets.** The refresh endpoint answers `304 Not Modified` when the render is the same.
 - **Patches changed ones.** Only the server's changes are applied to the live page. Rows are matched by what they link to or show, so added, removed or reordered items keep their elements.
-- **Pauses in background tabs.**
 - **Works for widgets nested** in `group` and `split-column`, and each widget refreshes under its own lock.
 
-Everything else is upstream Glance: see the [configuration docs](docs/configuration.md#refresh-interval).
+Everything else is upstream Glance: see the [configuration docs](docs/configuration.md#cache).
 
 ## Run
 

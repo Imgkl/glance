@@ -9,7 +9,17 @@
 const { chromium } = require(process.env.PLAYWRIGHT || "playwright");
 
 const base = process.argv[2] || "http://localhost:8080";
-const tick = 6500; // refresh-interval is 5s in the config this targets
+const tick = 6500; // AdGuard's cache is 5s in the config this targets
+
+// Refreshes every widget the page would refresh right away, instead of
+// waiting for each one's cache to expire, through the page's own module.
+const refreshAll = (page) => page.evaluate(async () => {
+    const src = [...document.scripts].find((s) => s.src.includes("page.js")).src.replace("page.js", "widget-refresh.js");
+    const { refreshWidgetNow } = await import(src);
+    const res = await fetch(`/api/pages${location.pathname}/content/`);
+    const schedule = JSON.parse(res.headers.get("X-Widget-Refresh-Schedule") || "{}");
+    await Promise.all(Object.keys(schedule).map(refreshWidgetNow));
+});
 
 const widgetByTitle = (title) => `[...document.querySelectorAll(".widget")].find((w) =>
     w.querySelector(".widget-header")?.innerText.trim().toUpperCase().startsWith(${JSON.stringify(title.toUpperCase())}))`;
@@ -45,11 +55,14 @@ const check = (name, ok, detail = "") => results.push({ name, ok, detail });
     })`);
 
     const homeBefore = await homeState();
+    // AdGuard refreshes on its own when its cache expires; the rest are forced.
     await page.waitForTimeout(tick);
+    const adguardTicked = (await homeState()).adguardText !== homeBefore.adguardText;
+    await refreshAll(page);
     const homeAfter = await homeState();
 
+    check("AdGuard refreshes on its own when its cache expires", adguardTicked, "its stats change every few seconds");
     check("AdGuard 'Top blocked domains' stays open", homeBefore.adguardOpen && homeAfter.adguardOpen);
-    check("AdGuard numbers still update", homeBefore.adguardText !== homeAfter.adguardText, "its stats change every tick");
     check("Tailscale 'Show more' stays expanded", homeBefore.tailscaleExpanded && homeAfter.tailscaleExpanded);
     check("Tailscale keeps a single expand button", homeAfter.tailscaleButtons === 1, `${homeAfter.tailscaleButtons} buttons`);
     check("Server Stats popover stays open while hovered", homeBefore.popoverShown && homeAfter.popoverShown);
@@ -58,22 +71,18 @@ const check = (name, ok, detail = "") => results.push({ name, ok, detail });
     await page.goto(`${base}/media`, { waitUntil: "networkidle" });
     await page.waitForTimeout(2000);
 
-    // Prowlarr has no refresh-interval in the config; turn it on in this tab only.
-    await page.evaluate(async (widget) => {
-        const el = eval(widget);
-        el.dataset.refreshInterval = "5";
-        const src = [...document.scripts].find((s) => s.src.includes("page.js")).src.replace("page.js", "widget-refresh.js");
-        (await import(src)).setupWidgetRefresh("");
-        el.querySelector(".expand-toggle-button").click();
-    }, widgetByTitle("Prowlarr Indexers"));
+    await page.evaluate(`${widgetByTitle("Prowlarr Indexers")}.querySelector(".expand-toggle-button").click()`);
 
     await page.evaluate(() => {
         window.__before = {
-            widgets: [...document.querySelectorAll(".widget[data-refresh-interval]")],
-            images: [...document.querySelectorAll(".widget[data-refresh-interval] img")],
+            widgets: [...document.querySelectorAll(".widget")],
+            images: [...document.querySelectorAll(".widget img")],
         };
     });
-    await page.waitForTimeout(tick * 2);
+    // Twice: the first refresh of each widget returns its full render, the
+    // second mostly 304s.
+    await refreshAll(page);
+    await refreshAll(page);
 
     const media = await page.evaluate(`(() => {
         const prowlarr = ${widgetByTitle("Prowlarr Indexers")};
@@ -87,7 +96,7 @@ const check = (name, ok, detail = "") => results.push({ name, ok, detail });
         };
     })()`);
 
-    check("No refreshing widget was rebuilt", media.widgetsReplaced === 0, `${media.widgetsReplaced}/${media.widgets} replaced`);
+    check("No widget was rebuilt", media.widgetsReplaced === 0, `${media.widgetsReplaced}/${media.widgets} replaced`);
     check("No poster/image was rebuilt", media.imagesReplaced === 0, `${media.imagesReplaced}/${media.images} replaced`);
     check("Prowlarr 'Show more' stays expanded", media.prowlarrExpanded && media.prowlarrButtons === 1, `${media.prowlarrButtons} buttons`);
 
@@ -99,7 +108,7 @@ const check = (name, ok, detail = "") => results.push({ name, ok, detail });
         const { morph } = await import(src.replace("page.js", "morph.js"));
         const { rememberServerRender } = await import(src.replace("page.js", "lifecycle.js"));
 
-        const id = [...document.querySelectorAll(".widget[data-refresh-interval]")]
+        const id = [...document.querySelectorAll(".widget[data-widget-id]")]
             .find((w) => w.querySelectorAll(".carousel-items-container > a[href]").length > 3)?.dataset.widgetId;
         if (id === undefined) return null;
 

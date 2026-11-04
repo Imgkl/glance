@@ -7,6 +7,20 @@ from the fork's own changes.
 
 Images: `ghcr.io/imgkl/glance:<version>` (published by CI on tag push).
 
+## v2026.11.1 — 2026-11-04
+
+### Fork
+- Changed: widgets refresh when their `cache` expires, so `cache` alone sets
+  how fresh a widget is. The page asks the server when each widget is next due
+  (on cache expiry, on the hour, or at an early retry after an error) instead
+  of polling on a fixed timer. The floor is 2 seconds.
+- Removed: `refresh-interval`. Configs that still set it fail to load with a
+  message pointing at `cache`. To convert, set `cache` to whichever of the two
+  values was longer.
+- Changed: every widget with data to fetch refreshes, not just ones opted in.
+  Widgets with nothing to fetch (`clock`, `bookmarks`, `search`, ...) and
+  containers (`group`, `split-column`) don't; their children refresh on their own.
+
 ## v2026.11.0 — 2026-11-03
 
 ### Upstream

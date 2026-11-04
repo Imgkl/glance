@@ -719,7 +719,6 @@ pages:
 | title-url | string | no |
 | hide-header | boolean | no | false |
 | cache | string | no |
-| refresh-interval | string | no |
 | css-class | string | no |
 
 #### `type`
@@ -739,7 +738,7 @@ When set to `true`, the header (title) of the widget will be hidden. You cannot 
 > If a widget fails to update, a red dot or circle is shown next to the title of that widget indicating that the it is not working. You will not be able to see this if you hide the header.
 
 #### `cache`
-How long to keep the fetched data in memory. The value is a string and must be a number followed by one of s, m, h, d. Examples:
+How long to keep the fetched data in memory, which is also how often the widget refreshes on the page. The value is a string and must be a number followed by one of s, m, h, d. Examples:
 
 ```yaml
 cache: 30s # 30 seconds
@@ -752,22 +751,9 @@ cache: 1d  # 1 day
 >
 > Not all widgets can have their cache duration modified. The calendar and weather widgets update on the hour and this cannot be changed.
 
-#### `refresh-interval`
-How often the widget should automatically refresh in the browser without a full page reload. Same syntax as `cache` (a number followed by `s`, `m`, `h`, or `d`). Each tick re-renders the widget; if the widget's cache hasn't expired, the existing data is reused, so a tight refresh interval is safe and won't hammer upstream APIs. The minimum allowed interval is 5 seconds.
+While the page is open and visible, each widget refreshes in place as soon as its cache expires, without reloading the page. If the new data renders the same as before, nothing on the page is touched; otherwise only what changed is patched, so images don't reload and anything you opened (expanded lists, dropdowns, popovers, scroll positions) stays as it was. After a failed update the widget retries early, and the page follows that too.
 
-If the rendered widget is unchanged, nothing on the page is touched. Otherwise only what changed is patched in place, so images don't reload and anything you opened (expanded lists, dropdowns, popovers, scroll positions) stays as it was.
-
-```yaml
-refresh-interval: 1m
-refresh-interval: 5m
-refresh-interval: 1h
-```
-
-When the page is hidden (tab in the background), refresh timers pause and resume on visibility — they don't fire while you're not looking.
-
-> [!NOTE]
->
-> Not all widget types support `refresh-interval`. The following are excluded because they hold interactive client-side state, embed external content, or have no data to refresh: `calendar`, `to-do`, `clock`, `iframe`, `html`, `search`, `bookmarks`, `group`, `split-column`. Setting `refresh-interval` on any of these will fail at config load.
+Nothing is fetched while no one is looking: refreshes stop when the page is closed or in a background tab and catch up when it's visible again. A widget refreshes at most every 2 seconds, however short its cache. Widgets with no data to fetch, like `clock`, `bookmarks` or `search`, don't refresh.
 
 #### `css-class`
 Set custom CSS classes for the specific widget instance.

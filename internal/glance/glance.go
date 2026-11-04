@@ -231,7 +231,7 @@ func newApplication(c *config) (*application, error) {
 }
 
 // recursive so widgets nested inside group/split-column are also reachable
-// by ID — without this their refresh-interval ticks would 404.
+// by ID — without this their refreshes would 404.
 func (a *application) registerWidget(w widget) {
 	a.widgetByID[w.GetID()] = w
 	if c, ok := w.(interface{ childWidgets() []widget }); ok {
@@ -380,6 +380,7 @@ func (a *application) handlePageContentRequest(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	setRefreshScheduleHeader(w, page)
 	w.Write(responseBytes.Bytes())
 }
 

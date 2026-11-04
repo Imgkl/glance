@@ -136,6 +136,7 @@ type widget interface {
 
 	initialize() error
 	requiresUpdate(*time.Time) bool
+	refreshIn(time.Time) (time.Duration, bool)
 	setProviders(*widgetProviders)
 	update(context.Context)
 	setID(uint64)
@@ -146,24 +147,9 @@ type widget interface {
 	validate() error
 }
 
-// Widgets that hold interactive client-side state, are static, or are
-// containers — none of these are valid targets for refresh-interval.
-var refreshIntervalDisallowedTypes = map[string]struct{}{
-	"calendar":        {},
-	"calendar-legacy": {},
-	"to-do":           {},
-	"clock":           {},
-	"iframe":          {},
-	"html":            {},
-	"group":           {},
-	"split-column":    {},
-	"search":          {},
-	"bookmarks":       {},
-}
-
-// floor against typos (e.g. 1s). upstream rate limiting is the cache's job,
-// not this floor — ticks below the cache window don't re-fetch.
-const minRefreshInterval = 5 * time.Second
+// The browser refreshes a widget when its cache expires (see refreshIn), but
+// never more often than this, so a tiny cache doesn't turn into a busy loop.
+const minRefreshDelay = 2 * time.Second
 
 type cacheType int
 
@@ -182,7 +168,6 @@ type widgetBase struct {
 	HideHeader          bool             `yaml:"hide-header"`
 	CSSClass            string           `yaml:"css-class"`
 	CustomCacheDuration durationField    `yaml:"cache"`
-	RefreshInterval     durationField    `yaml:"refresh-interval"`
 	ContentAvailable    bool             `yaml:"-"`
 	WIP                 bool             `yaml:"-"`
 	Error               error            `yaml:"-"`
@@ -195,6 +180,10 @@ type widgetBase struct {
 	// mu serializes update() and renderTemplate() for this widget.
 	// Without it, concurrent requests would race on templateBuffer and update state.
 	mu sync.Mutex `yaml:"-"`
+
+	// Removed in favour of refreshing on cache expiry; kept only to reject
+	// configs that still set it instead of silently ignoring them.
+	RemovedRefreshInterval durationField `yaml:"refresh-interval"`
 }
 
 type widgetProviders struct {
@@ -237,20 +226,22 @@ func (w *widgetBase) lock()   { w.mu.Lock() }
 func (w *widgetBase) unlock() { w.mu.Unlock() }
 
 func (w *widgetBase) validate() error {
-	if w.RefreshInterval == 0 {
-		return nil
-	}
-	if _, ok := refreshIntervalDisallowedTypes[w.Type]; ok {
-		return fmt.Errorf("widget type %q does not support refresh-interval", w.Type)
-	}
-	if time.Duration(w.RefreshInterval) < minRefreshInterval {
-		return fmt.Errorf("refresh-interval must be at least %s", minRefreshInterval)
+	if w.RemovedRefreshInterval != 0 {
+		return errors.New("refresh-interval has been removed: widgets now refresh in the browser whenever their cache expires, so set cache instead")
 	}
 	return nil
 }
 
-func (w *widgetBase) RefreshIntervalSeconds() int {
-	return int(time.Duration(w.RefreshInterval).Seconds())
+// refreshIn says how long until the browser should ask for this widget again:
+// when its data is next due (cache expiry, an hourly update or an early retry
+// after an error). Widgets that never update, including containers whose
+// children refresh on their own, report false. Call with the widget locked.
+func (w *widgetBase) refreshIn(now time.Time) (time.Duration, bool) {
+	if w.cacheType == cacheTypeInfinite {
+		return 0, false
+	}
+
+	return max(w.nextUpdate.Sub(now), minRefreshDelay), true
 }
 
 func (widget *widgetBase) handleRequest(w http.ResponseWriter, r *http.Request) {

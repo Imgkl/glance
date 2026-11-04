@@ -2,62 +2,64 @@ import { enhanceWidget } from './page.js';
 import { morph } from './morph.js';
 import { rememberServerRender, sweepRemovedElements } from './lifecycle.js';
 
-// Per-widget interval handles, keyed by widget id.
-const intervals = new Map();
-const intervalSeconds = new Map();
-const lastRefreshAt = new Map();
+// Refreshes each widget when the server says its data is next due: when its
+// cache expires, on the hour, or at an early retry after an error. The server
+// sends the delays (in milliseconds) with the page content and then with each
+// refresh, so the browser never polls faster than the data can change.
+// Nothing runs while the page is hidden.
+
+const RETRY_AFTER_FAILURE = 30_000;
+
+const dueAt = new Map();   // widget id -> timestamp of its next refresh
+const timers = new Map();  // widget id -> timeout handle
 const etags = new Map();
 const inFlight = new Set();
 
 let baseURL = "";
 let visibilityListenerInstalled = false;
 
-export function setupWidgetRefresh(_baseURL) {
+export function setupWidgetRefresh(_baseURL, schedule) {
     baseURL = _baseURL;
 
-    document.querySelectorAll(".widget[data-refresh-interval]").forEach((widgetEl) => {
-        const seconds = parseInt(widgetEl.dataset.refreshInterval, 10);
-        if (!seconds || seconds < 1) return;
-        const id = widgetEl.dataset.widgetId;
-        if (!id) return;
-        intervalSeconds.set(id, seconds);
-        startInterval(id, seconds);
-    });
+    for (const [id, delay] of Object.entries(schedule)) {
+        scheduleRefresh(id, delay);
+    }
 
-    if (visibilityListenerInstalled) return;
+    if (visibilityListenerInstalled || document.hidden === undefined) return;
     visibilityListenerInstalled = true;
-    if (document.hidden === undefined) return;
 
     document.addEventListener("visibilitychange", () => {
         if (document.hidden) {
-            for (const handle of intervals.values()) clearInterval(handle);
-            intervals.clear();
+            for (const handle of timers.values()) clearTimeout(handle);
+            timers.clear();
             return;
         }
 
+        // Whatever came due while hidden refreshes now; the rest resume.
         const now = Date.now();
-        intervalSeconds.forEach((seconds, id) => {
-            const last = lastRefreshAt.get(id) || 0;
-            if (now - last >= seconds * 1000) refreshWidget(id);
-            startInterval(id, seconds);
-        });
+        dueAt.forEach((at, id) => scheduleRefresh(id, at - now));
     });
 }
 
-function startInterval(id, seconds) {
-    const existing = intervals.get(id);
-    if (existing !== undefined) clearInterval(existing);
-    intervals.set(id, setInterval(() => refreshWidget(id), seconds * 1000));
+// Refreshes a widget right away, whenever it's next due. Used by the browser
+// check in dev/ to exercise refreshes without waiting on real data.
+export function refreshWidgetNow(id) {
+    return refreshWidget(id);
 }
 
-function stopInterval(id) {
-    const handle = intervals.get(id);
-    if (handle !== undefined) {
-        clearInterval(handle);
-        intervals.delete(id);
+function scheduleRefresh(id, delay) {
+    clearTimeout(timers.get(id));
+    dueAt.set(id, Date.now() + delay);
+
+    if (!document.hidden) {
+        timers.set(id, setTimeout(() => refreshWidget(id), Math.max(delay, 0)));
     }
-    intervalSeconds.delete(id);
-    lastRefreshAt.delete(id);
+}
+
+function stopRefreshing(id) {
+    clearTimeout(timers.get(id));
+    timers.delete(id);
+    dueAt.delete(id);
     etags.delete(id);
 }
 
@@ -67,14 +69,15 @@ function findWidget(id) {
 
 async function refreshWidget(id) {
     if (findWidget(id) === null) {
-        stopInterval(id);
+        stopRefreshing(id);
         return;
     }
 
-    // A slow upstream can make a request outlast the interval; don't stack them.
     if (inFlight.has(id)) return;
     inFlight.add(id);
-    lastRefreshAt.set(id, Date.now());
+    clearTimeout(timers.get(id));
+
+    let next = RETRY_AFTER_FAILURE;
 
     try {
         const headers = {};
@@ -86,16 +89,21 @@ async function refreshWidget(id) {
             headers,
         });
 
-        // Same render as last time: nothing to do, and nothing gets repainted.
-        if (res.status === 304) return;
-
-        if (!res.ok) {
-            // 404 means the widget id is unknown to the server (e.g., after a
-            // config reload that reassigned ids). Don't keep retrying — a full
-            // page reload will repopulate intervals with fresh ids.
-            if (res.status === 404) stopInterval(id);
+        // 404 means the widget id is unknown to the server (e.g., after a
+        // config reload that reassigned ids). A page reload picks up new ones.
+        if (res.status === 404) {
+            next = null;
             return;
         }
+
+        if (res.status === 304 || res.ok) {
+            const refreshIn = res.headers.get("X-Widget-Refresh-In");
+            next = refreshIn === null ? null : parseInt(refreshIn, 10);
+        }
+
+        // A 304 is the same render as last time: nothing gets repainted.
+        // Other failures try again after RETRY_AFTER_FAILURE.
+        if (!res.ok) return;
 
         const html = await res.text();
         const target = findWidget(id);
@@ -109,6 +117,12 @@ async function refreshWidget(id) {
         console.error("widget refresh failed", id, e);
     } finally {
         inFlight.delete(id);
+
+        if (next === null) {
+            stopRefreshing(id);
+        } else {
+            scheduleRefresh(id, next);
+        }
     }
 }
 

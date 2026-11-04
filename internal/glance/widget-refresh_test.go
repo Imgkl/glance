@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 type stubHTMLWidget struct {
@@ -51,5 +52,61 @@ func TestWidgetRefreshRevalidatesWithETag(t *testing.T) {
 	}
 	if changed.Header().Get("ETag") == etag {
 		t.Fatal("changed render kept the old ETag")
+	}
+}
+
+// The browser refreshes a widget only when the server's schedule says so, so
+// a widget missing from it (or listed wrongly) silently stops updating, and
+// one listed too eagerly turns into a busy loop.
+func TestRefreshScheduleFollowsWhenDataIsDue(t *testing.T) {
+	now := time.Now()
+
+	nested := &stubHTMLWidget{}
+	nested.ID = 2
+	nested.withCacheDuration(time.Minute).nextUpdate = now.Add(40 * time.Second)
+
+	static := &stubHTMLWidget{}
+	static.ID = 3
+
+	overdue := &stubHTMLWidget{}
+	overdue.ID = 4
+	overdue.withCacheDuration(time.Second).nextUpdate = now.Add(-time.Second)
+
+	group := &groupWidget{}
+	group.ID = 1
+	group.Widgets = widgets{nested, static}
+
+	p := &page{}
+	p.Columns = append(p.Columns, struct {
+		Size    string  `yaml:"size"`
+		Widgets widgets `yaml:"widgets"`
+	}{Widgets: widgets{group, overdue}})
+
+	schedule := p.refreshSchedule()
+
+	if len(schedule) != 2 {
+		t.Fatalf("want only the nested and overdue widgets scheduled, got %v", schedule)
+	}
+	if d := schedule[2]; d < 39_000 || d > 40_000 {
+		t.Errorf("nested widget: want ~40s until its cache expires, got %dms", d)
+	}
+	if d := schedule[4]; d != minRefreshDelay.Milliseconds() {
+		t.Errorf("overdue widget: want the %s floor, got %dms", minRefreshDelay, d)
+	}
+
+	app := &application{widgetByID: map[uint64]widget{2: nested, 3: static}}
+	refreshIn := func(id string) string {
+		req := httptest.NewRequest("GET", "/api/widgets/"+id+"/refresh", nil)
+		req.SetPathValue("widget", id)
+		rec := httptest.NewRecorder()
+		app.handleWidgetRefreshRequest(rec, req)
+		return rec.Header().Get(refreshInHeader)
+	}
+
+	if got := refreshIn("2"); got == "" {
+		t.Error("refresh response for a cached widget has no next refresh time")
+	}
+	if got := refreshIn("3"); got != "" {
+		t.Errorf("refresh response for a static widget asks for another refresh in %sms", got)
 	}
 }

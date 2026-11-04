@@ -10,8 +10,10 @@ async function fetchPageContent(pageData) {
     // TODO: add retries
     const response = await fetch(`${pageData.baseURL}/api/pages/${pageData.slug}/content/`);
     const content = await response.text();
+    // Widget id -> milliseconds until it should refresh (see widget-refresh.js).
+    const refreshSchedule = JSON.parse(response.headers.get("X-Widget-Refresh-Schedule") || "{}");
 
-    return content;
+    return { content, refreshSchedule };
 }
 
 // The setup functions that take a root are also re-run on a widget after a
@@ -836,7 +838,7 @@ async function setupPage() {
 
     const pageElement = document.getElementById("page");
     const pageContentElement = document.getElementById("page-content");
-    const pageContent = await fetchPageContent(pageData);
+    const { content: pageContent, refreshSchedule } = await fetchPageContent(pageData);
 
     pageContentElement.innerHTML = pageContent;
     // Before any setup function touches it, so refreshes can tell the
@@ -865,7 +867,7 @@ async function setupPage() {
         }
         contentReadyFired = true;
 
-        setupWidgetRefresh(pageData.baseURL);
+        setupWidgetRefresh(pageData.baseURL, refreshSchedule);
 
         setTimeout(() => {
             setupTruncatedElementTitles();
