@@ -7,6 +7,18 @@ from the fork's own changes.
 
 Images: `ghcr.io/imgkl/glance:<version>` (published by CI on tag push).
 
+## v2026.11.2 — 2026-11-17
+
+### Fork
+- Fixed: Jellyfin poster refresh logic now ships in the image as the
+  `jellyfinPrimaryImageURL` custom-api template helper. It selects the tag
+  belonging to the displayed movie, series, or season poster, preserving
+  cached images until their artwork changes. No additional API calls.
+- Added: coverage for poster selection, stable URLs for unchanged artwork,
+  changed URLs for updated artwork, template integration, and URL parameters.
+- Config: Movies, Shows, and History templates should call the helper after
+  selecting their image URL and image ID. Requires this image or newer.
+
 ## v2026.11.1 — 2026-11-04
 
 ### Fork
