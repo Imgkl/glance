@@ -21,7 +21,7 @@ Images for amd64, arm64 and armv7 are on GitHub Container Registry:
 ```yaml
 services:
   glance:
-    image: ghcr.io/imgkl/glance:v2026.11.0
+    image: ghcr.io/imgkl/glance:v2026.11.2
     volumes:
       - ./config:/app/config
     ports:

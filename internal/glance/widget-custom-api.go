@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -365,6 +366,33 @@ type decoratedGJSONResult struct {
 	gjson.Result
 }
 
+// Use the tag belonging to the displayed image, which may be a series or
+// season poster rather than the episode represented by item.
+func jellyfinPrimaryImageURL(imageURL string, item decoratedGJSONResult, imageID string) (string, error) {
+	var tag string
+	switch imageID {
+	case item.String("Id"):
+		tag = item.String("ImageTags.Primary")
+	case item.String("SeriesId"):
+		tag = item.String("SeriesPrimaryImageTag")
+	case item.String("ParentPrimaryImageItemId"):
+		tag = item.String("ParentPrimaryImageTag")
+	}
+	if tag == "" {
+		return imageURL, nil
+	}
+
+	parsed, err := url.Parse(imageURL)
+	if err != nil {
+		// The URL can contain an API key; do not include it in the error.
+		return "", errors.New("invalid Jellyfin primary image URL")
+	}
+	query := parsed.Query()
+	query.Set("tag", tag)
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
 func gJsonResultArrayToDecoratedResultArray(results []gjson.Result) []decoratedGJSONResult {
 	decoratedResults := make([]decoratedGJSONResult, len(results))
 
@@ -483,6 +511,7 @@ var customAPITemplateFuncs = func() template.FuncMap {
 	}
 
 	funcs := template.FuncMap{
+		"jellyfinPrimaryImageURL": jellyfinPrimaryImageURL,
 		"toFloat": func(a int) float64 {
 			return float64(a)
 		},

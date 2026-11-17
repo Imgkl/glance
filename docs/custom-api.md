@@ -425,6 +425,7 @@ The following functions are available on the `Options` object:
 
 The following helper functions provided by Glance are available:
 
+- `jellyfinPrimaryImageURL(imageURL string, item JSON, imageID string) string`: Adds Jellyfin's current image tag to an existing primary-image URL. Uses the item's own, series, or parent image tag according to `imageID`, so changing artwork changes the URL without reloading unchanged posters. Existing query parameters are preserved; an unavailable tag leaves the URL unchanged. For example, after selecting the displayed movie, series, or season ID: `{{ $thumbURL = jellyfinPrimaryImageURL $thumbURL $item $thumbID }}`. Available in this fork starting with `v2026.11.2`.
 - `toFloat(i int) float`: Converts an integer to a float.
 - `toInt(f float) int`: Converts a float to an integer.
 - `toRelativeTime(t time.Time) template.HTMLAttr`: Converts Time to a relative time such as 2h, 1d, etc which dynamically updates. **NOTE:** the value of this function should be used as an attribute in an HTML tag, e.g. `<span {{ toRelativeTime .Time }}></span>`.
